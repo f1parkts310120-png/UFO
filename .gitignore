@@ -32,6 +32,8 @@ vectordb/demonstration/*
 # Ignore the data files and scripts
 tasks/*
 scripts/*
+!scripts/resident-queue/
+!scripts/resident-queue/**
 backup/*
 node_modules/*
 
