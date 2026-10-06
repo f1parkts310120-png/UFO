@@ -179,11 +179,12 @@ The queue worker runs from a dedicated scheduled task named:
 
 Properties:
 
-- trigger: user logon;
+- triggers: user logon plus a one-minute health trigger;
+- health-trigger repetition duration: 3650 days, refreshed whenever the installer is run;
 - hidden: true;
 - run only in the current user session;
-- restart on failure;
-- single scheduled-task instance;
+- `RestartOnFailure` remains configured, but the validated recovery mechanism on this host is the one-minute health trigger because forced termination and a nonzero action exit did not cause Task Scheduler to relaunch the already-started action;
+- single scheduled-task instance with `MultipleInstances=IgnoreNew`, so health triggers are ignored while the resident worker is healthy;
 - action: Windows PowerShell with `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass`;
 - script path fixed to the local `ufo-pilot\autostart` directory.
 
@@ -299,7 +300,7 @@ Cover:
 1. **Queue success gate:** submit a safe Notepad task and confirm it moves `inbox -> running -> done` with exit code `0` and exact visible text.
 2. **Invalid payload gate:** submit a task containing an unapproved model and confirm it moves directly to `failed` without starting UFO.
 3. **Serialization gate:** submit two safe tasks and confirm the second does not enter execution until the first reaches a terminal state.
-4. **Restart gate:** stop the resident worker while idle, confirm Task Scheduler restarts it and heartbeat resumes.
+4. **Restart gate:** terminate the resident worker while idle, confirm the one-minute health trigger starts a new worker instance and heartbeat resumes without manual intervention.
 5. **Crash recovery gate:** simulate a stale task in `running` and confirm it is marked `interrupted_before_completion`, not replayed.
 6. **Visibility gate:** confirm the worker and runner execute with no visible PowerShell window and `ollama app.exe` remains absent.
 7. **Regression gate:** rerun the existing relevant UFO test suite and the previously validated GUI ValuePattern gate.
