@@ -80,6 +80,29 @@ class ResidentQueueInstallTests(unittest.TestCase):
         finally:
             cleanup_task(task_name)
 
+    def test_install_adds_minute_resilience_trigger(self):
+        task_name = "UFO-Queue-Test-" + uuid.uuid4().hex[:10]
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td) / "queue"
+                auto = Path(td) / "autostart"
+                p = run_install(task_name, root, auto)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                inspect = run_ps(
+                    f"$t=Get-ScheduledTask -TaskName {ps_quote(task_name)} -ErrorAction Stop; "
+                    "$rows=@($t.Triggers | ForEach-Object { [pscustomobject]@{type=$_.CimClass.CimClassName;interval=$_.Repetition.Interval} }); "
+                    "$rows | ConvertTo-Json -Compress"
+                )
+                self.assertEqual(inspect.returncode, 0, inspect.stdout + inspect.stderr)
+                triggers = json.loads(inspect.stdout.strip().splitlines()[-1])
+                if isinstance(triggers, dict):
+                    triggers = [triggers]
+                self.assertEqual(len(triggers), 2)
+                self.assertTrue(any("LogonTrigger" in row["type"] for row in triggers))
+                self.assertTrue(any(row.get("interval") == "PT1M" for row in triggers), triggers)
+        finally:
+            cleanup_task(task_name)
+
     def test_install_is_idempotent_and_uninstall_preserves_history(self):
         task_name = "UFO-Queue-Test-" + uuid.uuid4().hex[:10]
         try:

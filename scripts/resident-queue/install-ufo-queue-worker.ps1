@@ -41,9 +41,10 @@ if (-not [string]::Equals([System.IO.Path]::GetFullPath($RunnerPath), [System.IO
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$healthTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
 $settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-$null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force
+$null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($trigger, $healthTrigger) -Settings $settings -Principal $principal -Force
 
 if (-not $NoStart) {
     Start-ScheduledTask -TaskName $TaskName
