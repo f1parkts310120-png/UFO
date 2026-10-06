@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 
 function Get-UfoQueueCanonicalPath {
     param([Parameter(Mandatory=$true)][string]$Path)
@@ -130,4 +130,128 @@ function Test-UfoQueueDuplicateId {
         }
     }
     return $false
+}
+
+function Claim-UfoQueueTask {
+    param(
+        [Parameter(Mandatory=$true)][string]$InboxPath,
+        [Parameter(Mandatory=$true)][string]$QueueRoot,
+        [Parameter(Mandatory=$true)]$Task
+    )
+    $layout = Initialize-UfoQueueLayout -QueueRoot $QueueRoot
+    if ($Task.id -isnot [string] -or $Task.id -notmatch '^[A-Za-z0-9._-]{1,80}$') { throw "invalid_task_id" }
+    $source = Assert-UfoQueuePathUnderRoot -QueueRoot $layout.root -Path $InboxPath
+    $inboxPrefix = $layout.inbox.TrimEnd([char]'\',[char]'/') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $source.StartsWith($inboxPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw "source_not_in_inbox" }
+    if (-not [System.IO.File]::Exists($source)) { throw "task_file_missing" }
+
+    $paths = Get-UfoQueueTaskPaths -QueueRoot $layout.root -TaskId $Task.id
+    if ([System.IO.Directory]::Exists($paths.task_directory) -or [System.IO.File]::Exists($paths.task_json)) { throw "task_already_claimed" }
+    [System.IO.Directory]::CreateDirectory($paths.task_directory) | Out-Null
+    try {
+        [System.IO.File]::Move($source, $paths.task_json)
+    } catch {
+        if ([System.IO.Directory]::Exists($paths.task_directory) -and -not [System.IO.File]::Exists($paths.task_json)) {
+            try { [System.IO.Directory]::Delete($paths.task_directory, $false) } catch {}
+        }
+        throw
+    }
+    return $paths
+}
+
+function Write-UfoQueueResult {
+    param(
+        [Parameter(Mandatory=$true)][string]$TaskDirectory,
+        [Parameter(Mandatory=$true)]$Result
+    )
+    $dir = Get-UfoQueueCanonicalPath -Path $TaskDirectory
+    if (-not [System.IO.Directory]::Exists($dir)) { throw "task_directory_missing" }
+    $target = Join-Path $dir 'queue-result.json'
+    $token = [System.Diagnostics.Process]::GetCurrentProcess().Id.ToString() + '.' + [guid]::NewGuid().ToString('N')
+    $temp = Join-Path $dir ('.queue-result.' + $token + '.tmp')
+    $backup = Join-Path $dir ('.queue-result.' + $token + '.bak')
+    $json = $Result | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($temp, $json, [System.Text.UTF8Encoding]::new($false))
+    try {
+        if ([System.IO.File]::Exists($target)) {
+            [System.IO.File]::Replace($temp, $target, $backup)
+        } else {
+            [System.IO.File]::Move($temp, $target)
+        }
+    } finally {
+        if ([System.IO.File]::Exists($temp)) { [System.IO.File]::Delete($temp) }
+        if ([System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) }
+    }
+}
+
+function Complete-UfoQueueTask {
+    param(
+        [Parameter(Mandatory=$true)][string]$TaskDirectory,
+        [Parameter(Mandatory=$true)][string]$QueueRoot,
+        [Parameter(Mandatory=$true)][ValidateSet('done','failed')][string]$Status
+    )
+    $layout = Initialize-UfoQueueLayout -QueueRoot $QueueRoot
+    $source = Assert-UfoQueuePathUnderRoot -QueueRoot $layout.root -Path $TaskDirectory
+    $runningPrefix = $layout.running.TrimEnd([char]'\',[char]'/') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $source.StartsWith($runningPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw "task_not_in_running" }
+    if (-not [System.IO.Directory]::Exists($source)) { throw "task_directory_missing" }
+    $name = [System.IO.Path]::GetFileName($source.TrimEnd([char]'\',[char]'/'))
+    if ($name -notmatch '^[A-Za-z0-9._-]{1,80}$') { throw "invalid_task_id" }
+    $terminalRoot = if ($Status -ceq 'done') { $layout.done } else { $layout.failed }
+    $destination = Assert-UfoQueuePathUnderRoot -QueueRoot $layout.root -Path (Join-Path $terminalRoot $name)
+    if ([System.IO.Directory]::Exists($destination) -or [System.IO.File]::Exists($destination)) { throw "terminal_task_exists" }
+    [System.IO.Directory]::Move($source, $destination)
+    return $destination
+}
+
+function Recover-UfoQueueRunningTasks {
+    param([Parameter(Mandatory=$true)][string]$QueueRoot)
+    $layout = Initialize-UfoQueueLayout -QueueRoot $QueueRoot
+    $events = @()
+    foreach ($dir in @(Get-ChildItem -LiteralPath $layout.running -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $taskId = $dir.Name
+        $taskJson = Join-Path $dir.FullName 'task.json'
+        try {
+            if (Test-Path -LiteralPath $taskJson) {
+                $payload = Read-UfoQueueTaskFile -Path $taskJson
+                if ($payload.PSObject.Properties.Name -contains 'id' -and $payload.id -is [string] -and $payload.id -match '^[A-Za-z0-9._-]{1,80}$') {
+                    $taskId = [string]$payload.id
+                }
+            }
+        } catch {}
+        if ($taskId -notmatch '^[A-Za-z0-9._-]{1,80}$') { $taskId = 'interrupted-' + [guid]::NewGuid().ToString('N') }
+
+        $terminalStatus = $null
+        $resultPath = Join-Path $dir.FullName 'queue-result.json'
+        if (Test-Path -LiteralPath $resultPath) {
+            try {
+                $proofRaw = [System.IO.File]::ReadAllText($resultPath, [System.Text.Encoding]::UTF8)
+                $proof = $proofRaw | ConvertFrom-Json -ErrorAction Stop
+                $hasStatus = $proof.PSObject.Properties.Name -contains 'status'
+                $hasId = $proof.PSObject.Properties.Name -contains 'id'
+                if ($hasStatus -and $hasId -and ([string]$proof.id -ceq $taskId) -and @('done','failed') -ccontains [string]$proof.status) {
+                    $terminalStatus = [string]$proof.status
+                }
+            } catch {
+                $terminalStatus = $null
+            }
+        }
+
+        if ($null -eq $terminalStatus) {
+            $failure = [ordered]@{
+                id = $taskId
+                status = 'failed'
+                exit_code = $null
+                finished = (Get-Date).ToString('o')
+                duration_seconds = 0
+                error = 'interrupted_before_completion'
+            }
+            Write-UfoQueueResult -TaskDirectory $dir.FullName -Result $failure
+            $terminalStatus = 'failed'
+        }
+
+        $destination = Complete-UfoQueueTask -TaskDirectory $dir.FullName -QueueRoot $layout.root -Status $terminalStatus
+        $events += [pscustomobject][ordered]@{ id = $taskId; status = $terminalStatus; destination = $destination }
+    }
+    return $events
 }
