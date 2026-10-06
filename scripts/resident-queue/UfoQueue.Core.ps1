@@ -255,3 +255,64 @@ function Recover-UfoQueueRunningTasks {
     }
     return $events
 }
+
+function Write-UfoAtomicJsonFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)]$Value
+    )
+    $target = [System.IO.Path]::GetFullPath($Path)
+    $dir = [System.IO.Path]::GetDirectoryName($target)
+    [System.IO.Directory]::CreateDirectory($dir) | Out-Null
+    $token = [System.Diagnostics.Process]::GetCurrentProcess().Id.ToString() + '.' + [guid]::NewGuid().ToString('N')
+    $temp = Join-Path $dir ('.atomic.' + $token + '.tmp')
+    $backup = Join-Path $dir ('.atomic.' + $token + '.bak')
+    $json = $Value | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($temp, $json, [System.Text.UTF8Encoding]::new($false))
+    try {
+        if ([System.IO.File]::Exists($target)) {
+            [System.IO.File]::Replace($temp, $target, $backup)
+        } else {
+            [System.IO.File]::Move($temp, $target)
+        }
+    } finally {
+        if ([System.IO.File]::Exists($temp)) { [System.IO.File]::Delete($temp) }
+        if ([System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) }
+    }
+}
+
+function Write-UfoQueueHeartbeat {
+    param(
+        [Parameter(Mandatory=$true)][string]$QueueRoot,
+        [Parameter(Mandatory=$true)][datetime]$Started,
+        [AllowNull()]$CurrentTaskId,
+        [AllowNull()]$LastCompletedTaskId
+    )
+    $layout = Initialize-UfoQueueLayout -QueueRoot $QueueRoot
+    $heartbeat = [ordered]@{
+        pid = [System.Diagnostics.Process]::GetCurrentProcess().Id
+        started = $Started.ToString('o')
+        last_heartbeat = (Get-Date).ToString('o')
+        current_task_id = $CurrentTaskId
+        last_completed_task_id = $LastCompletedTaskId
+    }
+    Write-UfoAtomicJsonFile -Path (Join-Path $layout.state 'worker.json') -Value $heartbeat
+}
+
+function Write-UfoQueueCurrentState {
+    param(
+        [Parameter(Mandatory=$true)][string]$QueueRoot,
+        [Parameter(Mandatory=$true)][string]$TaskId,
+        [Parameter(Mandatory=$true)][datetime]$Started
+    )
+    $layout = Initialize-UfoQueueLayout -QueueRoot $QueueRoot
+    $state = [ordered]@{ id = $TaskId; started = $Started.ToString('o') }
+    Write-UfoAtomicJsonFile -Path (Join-Path $layout.state 'current.json') -Value $state
+}
+
+function Clear-UfoQueueCurrentState {
+    param([Parameter(Mandatory=$true)][string]$QueueRoot)
+    $layout = Initialize-UfoQueueLayout -QueueRoot $QueueRoot
+    $path = Join-Path $layout.state 'current.json'
+    if ([System.IO.File]::Exists($path)) { [System.IO.File]::Delete($path) }
+}
